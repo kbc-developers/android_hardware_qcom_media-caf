@@ -592,22 +592,6 @@ omx_core_cb_type core[] =
     }
   },
   {
-    "OMX.qcom.audio.encoder.tunneled.aac",
-    NULL, // Create instance function
-    // Unique instance handle
-    {
-      NULL,
-      NULL,
-      NULL,
-      NULL
-    },
-    NULL,   // Shared object library handle
-    "libOmxAacEnc.so",
-    {
-      "audio_encoder.aac"
-    }
-  },
-  {
     "OMX.qcom.audio.decoder.tunneled.Qcelp13Hw",
     NULL, // Create instance function
     // Unique instance handle

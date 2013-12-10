@@ -1,3 +1,4 @@
+ifneq ($(TARGET_BOARD_PLATFORM),msm7x27a)
 LOCAL_PATH := $(call my-dir)
 
 include $(CLEAR_VARS)
@@ -26,3 +27,4 @@ LOCAL_MODULE := libc2dcolorconvert
 LOCAL_ADDITIONAL_DEPENDENCIES := $(TARGET_OUT_INTERMEDIATES)/KERNEL_OBJ/usr
 
 include $(BUILD_SHARED_LIBRARY)
+endif

@@ -349,7 +349,11 @@ void* venc_dev::async_venc_message_thread (void *input)
             while (!ioctl(pfd.fd, VIDIOC_DQBUF, &v4l2_buf)) {
                 venc_msg.msgcode=VEN_MSG_INPUT_BUFFER_DONE;
                 venc_msg.statuscode=VEN_S_SUCCESS;
-                omxhdr=omx_venc_base->m_inp_mem_ptr+v4l2_buf.index;
+                if (omx_venc_base->mUseProxyColorFormat && !omx_venc_base->mUsesColorConversion)
+                    omxhdr = &omx_venc_base->meta_buffer_hdr[v4l2_buf.index];
+                else
+                    omxhdr = &omx_venc_base->m_inp_mem_ptr[v4l2_buf.index];
+
                 venc_msg.buf.clientdata=(void*)omxhdr;
                 omx->handle->ebd++;
 
@@ -816,7 +820,7 @@ bool venc_dev::venc_open(OMX_U32 codec)
         profile_level.level = V4L2_MPEG_VIDEO_H264_LEVEL_1_0;
         session_qp_range.minqp = 1;
         session_qp_range.maxqp = 51;
-    } else if (codec == OMX_VIDEO_CodingVPX) {
+    } else if (codec == OMX_VIDEO_CodingVP8) {
         m_sVenc_cfg.codectype = V4L2_PIX_FMT_VP8;
         codec_profile.profile = V4L2_MPEG_VIDC_VIDEO_VP8_UNUSED;
         profile_level.level = V4L2_MPEG_VIDC_VIDEO_VP8_VERSION_0;
@@ -1100,6 +1104,14 @@ bool venc_dev::venc_get_buf_req(unsigned long *min_buff_count,
             bufreq.count = *actual_buff_count;
         else
             bufreq.count = 2;
+
+        // Increase buffer-header count for metadata-mode on input port
+        // to improve buffering and reduce bottlenecks in clients
+        if (metadatamode && (bufreq.count < 9)) {
+            DEBUG_PRINT_LOW("FW returned buffer count = %d , overwriting with 16",
+                bufreq.count);
+            bufreq.count = 9;
+        }
 
         bufreq.type=V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
         ret = ioctl(m_nDriver_fd,VIDIOC_REQBUFS, &bufreq);
@@ -1470,7 +1482,7 @@ bool venc_dev::venc_set_param(void *paramData, OMX_INDEXTYPE index)
 
                  // For VP8, hier-p and ltr are mutually exclusive features in firmware
                  // Disable hier-p if ltr is enabled.
-                 if (m_codec == OMX_VIDEO_CodingVPX) {
+                 if (m_codec == OMX_VIDEO_CodingVP8) {
                      DEBUG_PRINT_LOW("Disable Hier-P as LTR is being set");
                      if (!venc_set_hier_layers(QOMX_HIERARCHICALCODING_P, 0)) {
                         DEBUG_PRINT_ERROR("Disabling Hier P count failed");
@@ -1676,7 +1688,7 @@ bool venc_dev::venc_set_param(void *paramData, OMX_INDEXTYPE index)
 
                 // For VP8, hier-p and ltr are mutually exclusive features in firmware
                 // Disable ltr if hier-p is enabled.
-                if (m_codec == OMX_VIDEO_CodingVPX) {
+                if (m_codec == OMX_VIDEO_CodingVP8) {
                     DEBUG_PRINT_LOW("Disable LTR as HIER-P is being set");
                     if(!venc_set_ltrmode(0, 1)) {
                          DEBUG_PRINT_ERROR("ERROR: Failed to disable ltrmode");
@@ -2125,7 +2137,7 @@ void venc_dev::venc_config_print()
             multislice.mslice_size);
 
     DEBUG_PRINT_HIGH("ENC_CONFIG: EntropyMode: %d, CabacModel: %ld",
-            entropy.longentropysel, entropy.cabacmodel);
+            entropy.entropysel, entropy.cabacmodel);
 
     DEBUG_PRINT_HIGH("ENC_CONFIG: DB-Mode: %ld, alpha: %ld, Beta: %ld",
             dbkfilter.db_mode, dbkfilter.slicealpha_offset,
@@ -2418,13 +2430,20 @@ bool venc_dev::venc_empty_buf(void *buffer, void *pmem_data_buf, unsigned index,
         // CPU (Eg: MediaCodec)  0            --             0              bufhdr
         // ---------------------------------------------------------------------------------------
         if (metadatamode) {
+            plane.m.userptr = index;
             meta_buf = (encoder_media_buffer_type *)bufhdr->pBuffer;
 
-            if (!meta_buf)
-                return false;
-
-            if (!color_format) {
-                plane.m.userptr = index;
+            if (!meta_buf) {
+                //empty EOS buffer
+                if (!bufhdr->nFilledLen && (bufhdr->nFlags & OMX_BUFFERFLAG_EOS)) {
+                    plane.data_offset = bufhdr->nOffset;
+                    plane.length = bufhdr->nAllocLen;
+                    plane.bytesused = bufhdr->nFilledLen;
+                    DEBUG_PRINT_LOW("venc_empty_buf: empty EOS buffer");
+                } else {
+                    return false;
+                }
+            } else if (!color_format) {
                 if (meta_buf->buffer_type == kMetadataBufferTypeCameraSource) {
                     plane.data_offset = meta_buf->meta_handle->data[1];
                     plane.length = meta_buf->meta_handle->data[2];
@@ -2437,19 +2456,17 @@ bool venc_dev::venc_empty_buf(void *buffer, void *pmem_data_buf, unsigned index,
                     plane.data_offset = 0;
                     plane.length = handle->size;
                     plane.bytesused = handle->size;
-                    DEBUG_PRINT_LOW("venc_empty_buf: Opaque camera buf: fd = %d filled %d of %d",
-                            fd, plane.bytesused, plane.length);
+                        DEBUG_PRINT_LOW("venc_empty_buf: Opaque camera buf: fd = %d "
+                                ": filled %d of %d", fd, plane.bytesused, plane.length);
                 }
             } else {
-                plane.m.userptr = (unsigned long) bufhdr->pBuffer;
                 plane.data_offset = bufhdr->nOffset;
                 plane.length = bufhdr->nAllocLen;
                 plane.bytesused = bufhdr->nFilledLen;
-                DEBUG_PRINT_LOW("venc_empty_buf: Opaque non-camera buf: fd = %d filled %d of %d",
-                        fd, plane.bytesused, plane.length);
+                DEBUG_PRINT_LOW("venc_empty_buf: Opaque non-camera buf: fd = %d "
+                        ": filled %d of %d", fd, plane.bytesused, plane.length);
             }
         } else {
-            plane.m.userptr = (unsigned long) bufhdr->pBuffer;
             plane.data_offset = bufhdr->nOffset;
             plane.length = bufhdr->nAllocLen;
             plane.bytesused = bufhdr->nFilledLen;
@@ -3280,7 +3297,7 @@ bool venc_dev::venc_set_entropy_config(OMX_BOOL enable, OMX_U32 i_cabac_level)
         }
 
         DEBUG_PRINT_LOW("Success IOCTL set control for id=%d, value=%d", control.id, control.value);
-        entropy.longentropysel = control.value;
+        entropy.entropysel = control.value;
 
         if (i_cabac_level == 0) {
             control.value = V4L2_CID_MPEG_VIDC_VIDEO_H264_CABAC_MODEL_0;
@@ -3314,7 +3331,7 @@ bool venc_dev::venc_set_entropy_config(OMX_BOOL enable, OMX_U32 i_cabac_level)
         }
 
         DEBUG_PRINT_LOW("Success IOCTL set control for id=%d, value=%d", control.id, control.value);
-        entropy.longentropysel=control.value;
+        entropy.entropysel=control.value;
     } else {
         DEBUG_PRINT_ERROR("Invalid Entropy mode for Baseline Profile");
         return false;
